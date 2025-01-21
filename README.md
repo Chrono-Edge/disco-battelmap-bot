@@ -1,1 +1,1 @@
-# disco-battelmap-bot-
+# disco-battelmap-bot
