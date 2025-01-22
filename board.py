@@ -79,7 +79,7 @@ class Token:
             if isinstance(img, Image):
                 self.img = self.img.clone()
 
-            self.img.resize(self._board.token_dim * self.dim, self._board.token_dim * self.dim)
+            self.img.liquid_rescale(self._board.token_dim * self.dim, self._board.token_dim * self.dim)
 
         self.img = img
 
