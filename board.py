@@ -71,13 +71,15 @@ class Token:
 
     def _set_image(self, img):
         if isinstance(img, bytes):
-            img = Image(blob=img)
+            self.img = Image(blob=img)
         elif isinstance(img, str):
-            img = Image(filename=img)
-        else:
-            img = img.clone()
+            self.img = Image(filename=img)
 
-        img.resize(self._board.token_dim * self.dim, self._board.token_dim * self.dim)
+        if self.img.size[0] != self._board.token_dim * self.dim or self.img.size[1] != self._board.token_dim * self.dim:
+            if isinstance(img, Image):
+                self.img = self.img.clone()
+
+            self.img.resize(self._board.token_dim * self.dim, self._board.token_dim * self.dim)
 
         self.img = img
 
