@@ -9,6 +9,8 @@ from wand.drawing import Drawing
 POS_RE = re.compile(r"^([A-Z]{1,4})(\d+)$")
 
 
+### Made by txlyre
+
 def label_generator():
     for r in itertools.count(1):
         for i in itertools.product(string.ascii_uppercase, repeat=r):
@@ -160,14 +162,14 @@ class Token:
 
 class Board:
     def __init__(
-        self,
-        bgimg,
-        dim=None,
-        token_dim=70,
-        padding=48,
-        font="./Arial.ttf",
-        font_size=28,
-        line_width=2,
+            self,
+            bgimg,
+            dim=None,
+            token_dim=70,
+            padding=48,
+            font="./Arial.ttf",
+            font_size=28,
+            line_width=2,
     ):
         if isinstance(bgimg, bytes):
             bgimg = Image(blob=bgimg)
