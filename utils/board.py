@@ -1,4 +1,6 @@
 import re
+import copy
+import math
 import string
 import itertools
 
@@ -10,6 +12,7 @@ POS_RE = re.compile(r"^([A-Z]{1,4})(\d+)$")
 
 
 ### Made by txlyre
+
 
 def label_generator():
     for r in itertools.count(1):
@@ -54,9 +57,10 @@ class OutOfBounds(Exception):
 
 
 class Token:
-    def __init__(self, img, dim=1, **data):
-        self.dim = dim
+    def __init__(self, img, dim=1, label=None, **data):
         self.img = img
+        self.dim = dim
+        self.label = label
         self.data = data
 
         self._board = None
@@ -71,19 +75,36 @@ class Token:
     def __str__(self):
         return repr(self)
 
+    def __deepcopy__(self, memo):
+        data = copy.deepcopy(self.data, memo)
+
+        token = Token(self.img, self.dim, self.label, **data)
+        token._board = self._board
+        token._x = self._x
+        token._y = self._y
+
+        token.hidden = self.hidden
+
+        return token
+
     def _set_image(self, img):
         if isinstance(img, bytes):
             self.img = Image(blob=img)
         elif isinstance(img, str):
             self.img = Image(filename=img)
+        else:
+            self.img = img
 
-        if self.img.size[0] != self._board.token_dim * self.dim or self.img.size[1] != self._board.token_dim * self.dim:
+        if (
+            self.img.size[0] != self._board.token_dim * self.dim
+            or self.img.size[1] != self._board.token_dim * self.dim
+        ):
             if isinstance(img, Image):
                 self.img = self.img.clone()
 
-            self.img.liquid_rescale(self._board.token_dim * self.dim, self._board.token_dim * self.dim)
-
-        self.img = img
+            self.img.liquid_rescale(
+                self._board.token_dim * self.dim, self._board.token_dim * self.dim
+            )
 
     def _set_board(self, board):
         self._board = board
@@ -108,11 +129,13 @@ class Token:
         self.hidden = False
 
     def remove(self):
+        self._board.snap()
+
         self._board.tokens.remove(self)
 
         self._board = None
 
-    def move(self, pos):
+    def move(self, pos, snap=True):
         if isinstance(pos, tuple):
             x, y = pos
         else:
@@ -124,6 +147,9 @@ class Token:
 
             if y + self.dim > self._board.h:
                 raise OutOfBounds
+
+        if snap:
+            self._board.snap()
 
         self._x = x
         self._y = y
@@ -162,14 +188,16 @@ class Token:
 
 class Board:
     def __init__(
-            self,
-            bgimg,
-            dim=None,
-            token_dim=70,
-            padding=48,
-            font="./Arial.ttf",
-            font_size=28,
-            line_width=2,
+        self,
+        bgimg,
+        dim=None,
+        token_dim=70,
+        padding=48,
+        font="./Arial.ttf",
+        font_size=28,
+        label_font_size=20,
+        label_outline_width=3,
+        line_width=2,
     ):
         if isinstance(bgimg, bytes):
             bgimg = Image(blob=bgimg)
@@ -195,15 +223,49 @@ class Board:
         self.font = font
         self.font_size = font_size
         self.line_width = line_width
+        self.label_font_size = label_font_size
+        self.label_outline_width = label_outline_width
 
         self.pw = w * self.token_dim + self.padding * 2
         self.ph = h * self.token_dim + self.padding * 2
 
         bgimg.liquid_rescale(self.pw - self.padding * 2, self.ph - self.padding * 2)
 
+        with Image(width=1, height=1) as im:
+            with Drawing() as draw:
+                self.font_size = self.font_size
+                self.font_metrics = draw.get_font_metrics(im, "lorem ipsum")
+
+                self.font_size = self.label_font_size
+                self.label_font_metrics = draw.get_font_metrics(im, "lorem ipsum")
+
         self.bgimg = bgimg
 
         self.tokens = []
+
+        self.history = []
+        self.history_pos = -1
+
+    def snap(self):
+        if self.history_pos < -1:
+            self.history = self.history[: self.history_pos]
+            self.history_pos = -1
+
+        self.history.append(copy.deepcopy(self.tokens))
+
+    def undo(self):
+        if abs(self.history_pos) > len(self.history):
+            raise OutOfBounds
+
+        self.tokens = copy.deepcopy(self.history[self.history_pos])
+        self.history_pos -= 1
+
+    def redo(self):
+        if self.history_pos >= -1:
+            raise OutOfBounds
+
+        self.history_pos += 1
+        self.tokens = copy.deepcopy(self.history[self.history_pos])
 
     def pos2coords(self, pos):
         x, y = POS_RE.match(pos.strip().upper()).groups()
@@ -238,9 +300,14 @@ class Board:
         return None
 
     def add(self, pos, token):
+        if token._board is not None:
+            raise ValueError
+
+        self.snap()
+
         token._set_board(self)
 
-        token.move(pos)
+        token.move(pos, snap=False)
 
         self.tokens.append(token)
 
@@ -275,16 +342,42 @@ class Board:
 
             draw(im)
 
-        for token in self.tokens:
-            if not unhide and token.hidden:
-                continue
+        with Drawing() as draw:
+            draw.font = self.font
 
-            x, y = token.coords
+            for token in self.tokens:
+                if not unhide and token.hidden:
+                    continue
 
-            im.composite(
-                token.img,
-                x * self.token_dim + self.padding,
-                y * self.token_dim + self.padding,
-            )
+                x, y = token.coords
+
+                im.composite(
+                    token.img,
+                    x * self.token_dim + self.padding,
+                    y * self.token_dim + self.padding,
+                )
+
+                if token.label is not None:
+                    maxlen = math.ceil(
+                        self.token_dim / self.label_font_metrics.character_width
+                    )
+
+                    draw.stroke_color = Color("black")
+                    draw.font_size = self.label_font_size + self.label_outline_width
+                    draw.text(
+                        x * self.token_dim + self.padding,
+                        y * self.token_dim + self.padding + self.token_dim,
+                        token.label[:maxlen],
+                    )
+
+                    draw.stroke_color = Color("white")
+                    draw.font_size = self.label_font_size
+                    draw.text(
+                        x * self.token_dim + self.padding,
+                        y * self.token_dim + self.padding + self.token_dim,
+                        token.label[:maxlen],
+                    )
+
+            draw(im)
 
         return im
