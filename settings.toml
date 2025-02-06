@@ -1,6 +1,3 @@
-title = "DiscoBattleMapBot"
-
-# Logging settings
 [logging]
 file_path = 'logs/bot.log'
 level = "INFO"

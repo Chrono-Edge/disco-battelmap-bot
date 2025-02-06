@@ -1,32 +1,56 @@
-import discord
-from discord.ext import commands
+import asyncio
+from typing import Optional
+from config import values
+import aiohttp
+import interactions
+from interactions import slash_command, SlashContext
+from interactions import OptionType, slash_option, Attachment
+from utils import board
 
-# Use global values with custom class as state
-# Drop all logs of battle a
+bot = interactions.Client(
+    sync_interactions=True,
+)
 
-# Создаем бота с базовыми intents
-intents = discord.Intents.default()
-bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Класс View для нашего меню с кнопками
-class MenuView(discord.ui.View):
-    def __init__(self):
-        super().__init__()
+@slash_command(name="start_session", description="Start new map")
+@slash_option(
+    name="Map Image",
+    description="Setup you custom map image",
+    required=True,
+    opt_type=OptionType.ATTACHMENT
+)
+@slash_option(
+    name="square size",
+    description="Setup you custom square image",
+    required=True,
+    opt_type=OptionType.INTEGER
+)
+async def start_session(ctx: SlashContext, image: Attachment):
+    await ctx.defer()
 
-    # Кнопка 1
-    @discord.ui.button(label="Опция 1", style=discord.ButtonStyle.primary, custom_id="option1")
-    async def option1(self, button: discord.ui.Button, interaction: discord.Interaction):
-        await interaction.response.send_message("Вы выбрали опцию 1", ephemeral=True)
+    await ctx.send(f"{image.url}")
 
-    # Кнопка 2
-    @discord.ui.button(label="Опция 2", style=discord.ButtonStyle.secondary, custom_id="option2")
-    async def option2(self, button: discord.ui.Button, interaction: discord.Interaction):
-        await interaction.response.send_message("Вы выбрали опцию 2", ephemeral=True)
 
-# Команда для вызова меню
-@bot.command()
-async def menu(ctx):
-    view = MenuView()
-    await ctx.send("Выберите опцию:", view=view)
+@slash_command(name="my_command", description="My first command :)")
+async def my_command_function(ctx: SlashContext):
+    await ctx.defer()
+    await ctx.send("Hello World")
 
-bot.run("YOUR_BOT_TOKEN")
+
+@slash_command(name="my_long_command", description="My second command :)")
+async def my_long_command_function(ctx: SlashContext):
+    # need to defer it, otherwise, it fails
+    await ctx.defer()
+
+    # do stuff for a bit
+    await asyncio.sleep(600)
+
+    await ctx.send("Hello World")
+
+
+@interactions.listen()
+async def on_startup():
+    print("Bot is ready!")
+
+
+bot.start(values.get("bot.token"))
