@@ -1,5 +1,4 @@
 import re
-import copy
 import math
 import string
 import itertools
@@ -70,22 +69,29 @@ class Token:
         self.hidden = False
 
     def __repr__(self):
-        return f"<Token {self.pos}>"
+        if not self._board:
+            return "<Token>"
+
+        return f"<Token {self._board} {self.pos}>"
 
     def __str__(self):
         return repr(self)
 
-    def __deepcopy__(self, memo):
-        data = copy.deepcopy(self.data, memo)
+    def __setattr__(self, key, value):
+        if key in ("img", "dim", "label", "data", "_board", "_x", "_y", "hidden"):
+            self.__dict__[key] = value
 
-        token = Token(self.img, self.dim, self.label, **data)
-        token._board = self._board
-        token._x = self._x
-        token._y = self._y
+            return
 
-        token.hidden = self.hidden
+        if key in self.data:
+            self.record(HistoryRecord.UPDATE, key=key, new=value, old=self.data[key])
+        else:
+            self.record(HistoryRecord.UPDATE, key=key, new=value)
 
-        return token
+        self.data[key] = value
+
+    def __getattr__(self, key):
+        return self.data[key]
 
     def _set_image(self, img):
         if isinstance(img, bytes):
@@ -96,8 +102,8 @@ class Token:
             self.img = img
 
         if (
-                self.img.size[0] != self._board.token_dim * self.dim
-                or self.img.size[1] != self._board.token_dim * self.dim
+            self.img.size[0] != self._board.token_dim * self.dim
+            or self.img.size[1] != self._board.token_dim * self.dim
         ):
             if isinstance(img, Image):
                 self.img = self.img.clone()
@@ -122,20 +128,29 @@ class Token:
 
         return l + str(i)
 
+    def record(self, action, **fields):
+        self._board.record(self, action, **fields)
+
     def hide(self):
-        self.hidden = True
+        if not self.hidden:
+            self.hidden = True
+
+            self.record(HistoryRecord.HIDE)
 
     def unhide(self):
-        self.hidden = False
+        if self.hidden:
+            self.hidden = False
+
+            self.record(HistoryRecord.UNHIDE)
 
     def remove(self):
-        self._board.snap()
+        self.record(HistoryRecord.REMOVE)
 
         self._board.tokens.remove(self)
 
         self._board = None
 
-    def move(self, pos, snap=True):
+    def move(self, pos, record=True):
         if isinstance(pos, tuple):
             x, y = pos
         else:
@@ -148,8 +163,8 @@ class Token:
             if y + self.dim > self._board.h:
                 raise OutOfBounds
 
-        if snap:
-            self._board.snap()
+        if record:
+            self.record(HistoryRecord.MOVE, ox=self._x, oy=self._y, x=x, y=y)
 
         self._x = x
         self._y = y
@@ -186,18 +201,96 @@ class Token:
         self.move((x, y))
 
 
+class HistoryRecord:
+    CREATE = 0
+    MOVE = 1
+    HIDE = 2
+    UNHIDE = 3
+    REMOVE = 4
+    UPDATE = 5
+
+    def __init__(self, action, token, **fields):
+        self.action = action
+        self.token = token
+        self.board = token._board
+
+        self.fields = fields
+
+    def __repr__(self):
+        return f"<HistoryRecord {self.action} {self.token} {self.board}>"
+
+    def __str__(self):
+        return repr(self)
+
+    def do(self):
+        match self.action:
+            case HistoryRecord.CREATE:
+                self.token._set_board(self.board)
+
+                self.board.tokens.add(self.token)
+
+                self.token._x = self.fields["x"]
+                self.token._y = self.fields["y"]
+
+            case HistoryRecord.MOVE:
+                self.token._x = self.fields["x"]
+                self.token._y = self.fields["y"]
+
+            case HistoryRecord.HIDE:
+                self.token.hide()
+
+            case HistoryRecord.UNHIDE:
+                self.token.unhide()
+
+            case HistoryRecord.REMOVE:
+                self.board.tokens.remove(self.token)
+
+                self.token._board = None
+
+            case HistoryRecord.UPDATE:
+                self.token.data[self.fields["key"]] = self.fields["new"]
+
+    def undo(self):
+        match self.action:
+            case HistoryRecord.CREATE:
+                self.board.tokens.remove(self.token)
+
+                self.token._board = None
+
+            case HistoryRecord.MOVE:
+                self.token._x = self.fields["ox"]
+                self.token._y = self.fields["oy"]
+
+            case HistoryRecord.HIDE:
+                self.token.unhide()
+
+            case HistoryRecord.UNHIDE:
+                self.token.hide()
+
+            case HistoryRecord.REMOVE:
+                self.token._set_board(self.board)
+
+                self.board.tokens.add(self.token)
+
+            case HistoryRecord.UPDATE:
+                if "old" not in self.fields:
+                    del self.token.data[self.fields["key"]]
+                else:
+                    self.token.data[self.fields["key"]] = self.fields["old"]
+
+
 class Board:
     def __init__(
-            self,
-            bgimg,
-            dim=None,
-            token_dim=70,
-            padding=48,
-            font="./Arial.ttf",
-            font_size=28,
-            label_font_size=20,
-            label_outline_width=3,
-            line_width=2,
+        self,
+        bgimg,
+        dim=None,
+        token_dim=70,
+        padding=48,
+        font="./Arial.ttf",
+        font_size=28,
+        label_font_size=20,
+        label_outline_width=3,
+        line_width=2,
     ):
         if isinstance(bgimg, bytes):
             bgimg = Image(blob=bgimg)
@@ -241,23 +334,29 @@ class Board:
 
         self.bgimg = bgimg
 
-        self.tokens = []
+        self.tokens = set()
 
         self.history = []
         self.history_pos = -1
 
-    def snap(self):
+    def __repr__(self):
+        return f"<Board {self.w}x{self.h}>"
+
+    def __str__(self):
+        return repr(self)
+
+    def record(self, token, action, **fields):
         if self.history_pos < -1:
             self.history = self.history[: self.history_pos]
             self.history_pos = -1
 
-        self.history.append(copy.deepcopy(self.tokens))
+        self.history.append(HistoryRecord(action, token, **fields))
 
     def undo(self):
-        if abs(self.history_pos) > len(self.history):
+        if abs(self.history_pos) > len(self.history) or not self.history:
             raise OutOfBounds
 
-        self.tokens = copy.deepcopy(self.history[self.history_pos])
+        self.history[self.history_pos].undo()
         self.history_pos -= 1
 
     def redo(self):
@@ -265,7 +364,7 @@ class Board:
             raise OutOfBounds
 
         self.history_pos += 1
-        self.tokens = copy.deepcopy(self.history[self.history_pos])
+        self.history[self.history_pos].do()
 
     def pos2coords(self, pos):
         x, y = POS_RE.match(pos.strip().upper()).groups()
@@ -300,18 +399,18 @@ class Board:
         return None
 
     def add(self, pos, token):
-        if token._board is not None:
+        if token._board is not None or token in self.tokens:
             raise ValueError
-
-        self.snap()
 
         token._set_board(self)
 
-        token.move(pos, snap=False)
+        token.move(pos, record=False)
 
-        self.tokens.append(token)
+        self.tokens.add(token)
 
-    def draw(self, unhide=False) -> Image:
+        token.record(HistoryRecord.CREATE, x=token._x, y=token._y)
+
+    def draw(self, unhide=False):
         im = Image(width=self.pw, height=self.ph, pseudo="canvas:")
 
         im.composite(self.bgimg, self.padding, self.padding)
@@ -363,14 +462,6 @@ class Board:
                     )
 
                     draw.stroke_color = Color("black")
-                    draw.font_size = self.label_font_size + self.label_outline_width
-                    draw.text(
-                        x * self.token_dim + self.padding,
-                        y * self.token_dim + self.padding + self.token_dim,
-                        token.label[:maxlen],
-                    )
-
-                    draw.stroke_color = Color("white")
                     draw.font_size = self.label_font_size
                     draw.text(
                         x * self.token_dim + self.padding,
@@ -378,6 +469,37 @@ class Board:
                         token.label[:maxlen],
                     )
 
+                    draw.stroke_color = Color("white")
+                    draw.font_size = self.label_font_size + self.label_outline_width
+                    draw.text(
+                        x * self.token_dim + self.padding,
+                        y * self.token_dim + self.padding + self.token_dim,
+                        token.label[:maxlen],
+                    )
+
             draw(im)
+
+        return im
+
+    def replay(self, delay=None, optimize=True):
+        while self.history_pos >= -len(self.history):
+            self.undo()
+
+        im = self.draw()
+
+        if delay:
+            im.delay = int(im.ticks_per_second / 1000 * delay)
+
+        while self.history_pos < -1:
+            self.redo()
+
+            im.sequence.append(self.draw())
+
+        if delay:
+            for frame in im.sequence:
+                frame.delay = int(frame.ticks_per_second / 1000 * delay)
+
+        if optimize:
+            im.optimize_layers()
 
         return im
