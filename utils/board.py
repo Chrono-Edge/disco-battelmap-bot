@@ -96,8 +96,8 @@ class Token:
             self.img = img
 
         if (
-            self.img.size[0] != self._board.token_dim * self.dim
-            or self.img.size[1] != self._board.token_dim * self.dim
+                self.img.size[0] != self._board.token_dim * self.dim
+                or self.img.size[1] != self._board.token_dim * self.dim
         ):
             if isinstance(img, Image):
                 self.img = self.img.clone()
@@ -188,16 +188,16 @@ class Token:
 
 class Board:
     def __init__(
-        self,
-        bgimg,
-        dim=None,
-        token_dim=70,
-        padding=48,
-        font="./Arial.ttf",
-        font_size=28,
-        label_font_size=20,
-        label_outline_width=3,
-        line_width=2,
+            self,
+            bgimg,
+            dim=None,
+            token_dim=70,
+            padding=48,
+            font="./Arial.ttf",
+            font_size=28,
+            label_font_size=20,
+            label_outline_width=3,
+            line_width=2,
     ):
         if isinstance(bgimg, bytes):
             bgimg = Image(blob=bgimg)
@@ -311,7 +311,7 @@ class Board:
 
         self.tokens.append(token)
 
-    def draw(self, unhide=False):
+    def draw(self, unhide=False) -> Image:
         im = Image(width=self.pw, height=self.ph, pseudo="canvas:")
 
         im.composite(self.bgimg, self.padding, self.padding)
