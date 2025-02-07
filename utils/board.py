@@ -462,7 +462,7 @@ class Board:
                     )
 
                     draw.stroke_color = Color("black")
-                    draw.font_size = self.label_font_size
+                    draw.font_size = self.label_font_size + self.label_outline_width
                     draw.text(
                         x * self.token_dim + self.padding,
                         y * self.token_dim + self.padding + self.token_dim,
@@ -470,7 +470,7 @@ class Board:
                     )
 
                     draw.stroke_color = Color("white")
-                    draw.font_size = self.label_font_size + self.label_outline_width
+                    draw.font_size = self.label_font_size
                     draw.text(
                         x * self.token_dim + self.padding,
                         y * self.token_dim + self.padding + self.token_dim,
