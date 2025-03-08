@@ -1,5 +1,6 @@
 import asyncio
 import io
+from pickle import FALSE
 from typing import Optional
 from config import values
 import aiohttp
@@ -18,7 +19,6 @@ storage = {
 }
 
 
-
 @slash_command(name="start_session", description="Start new map")
 @slash_option(
     name="map_image",
@@ -29,10 +29,10 @@ storage = {
 @slash_option(
     name="square_size",
     description="Setup you custom square image",
-    required=True,
+    required=False,
     opt_type=OptionType.INTEGER
 )
-async def start_session(ctx: SlashContext, map_image: Attachment, square_size: int):
+async def start_session(ctx: SlashContext, map_image: Attachment, square_size: int = 70):
     await ctx.defer()
 
     aiohttp_session = aiohttp.ClientSession()
@@ -40,7 +40,7 @@ async def start_session(ctx: SlashContext, map_image: Attachment, square_size: i
         image_bytes = await resp.content.read()
     await aiohttp_session.close()
     logger.info("Start load board")
-    current_board = board.Board(image_bytes, token_dim=square_size)
+    current_board = board.Board(image_bytes, cell_size=square_size)
     logger.info("Render image")
     image = current_board.draw()
     file_out = io.BytesIO()
@@ -86,4 +86,4 @@ async def on_startup():
     print("Bot is ready!")
 
 
-bot.start(values.get("bot.token"))
+bot.start(values.get("secrets.token"))

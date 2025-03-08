@@ -2,6 +2,7 @@ import re
 import math
 import string
 import itertools
+from typing import Generator, Tuple, Optional, Set, List, Dict, Any, Literal
 
 from wand.image import Image
 from wand.color import Color
@@ -13,493 +14,659 @@ POS_RE = re.compile(r"^([A-Z]{1,4})(\d+)$")
 ### Made by txlyre
 
 
-def label_generator():
-    for r in itertools.count(1):
-        for i in itertools.product(string.ascii_uppercase, repeat=r):
-            yield "".join(i)
+def label_generator() -> Generator[str, None, None]:
+    """Generates labels in alphabetical order (A, B, C..., Z, AA, AB...)."""
+    for label_length in itertools.count(1):
+        for letters in itertools.product(string.ascii_uppercase, repeat=label_length):
+            yield "".join(letters)
 
 
-def label2index(l):
-    i = 0
+def label2index(label_to_find: str) -> int:
+    """Converts a label (e.g., 'A', 'AA', 'B3') to a zero-based index.
 
-    for ol in label_generator():
-        if l == ol:
+    Args:
+        label_to_find: The label string to convert.
+
+    Returns:
+        The zero-based index of the label.
+    """
+    index = 0
+    for generated_label in label_generator():
+        if label_to_find == generated_label:
             break
-
-        i += 1
-
-    return i
+        index += 1
+    return index
 
 
 class Direction:
-    L = (-1, 0)
-    R = (1, 0)
-    U = (0, -1)
-    D = (0, 1)
+    """Defines named tuples for common directions."""
 
-    UL = (-1, -1)
-    UR = (1, -1)
-    DL = (-1, 1)
-    DR = (1, 1)
+    L: Tuple[int, int] = (-1, 0)  # Left
+    R: Tuple[int, int] = (1, 0)  # Right
+    U: Tuple[int, int] = (0, -1)  # Up
+    D: Tuple[int, int] = (0, 1)  # Down
+
+    UL: Tuple[int, int] = (-1, -1)  # Up-Left
+    UR: Tuple[int, int] = (1, -1)  # Up-Right
+    DL: Tuple[int, int] = (-1, 1)  # Down-Left
+    DR: Tuple[int, int] = (1, 1)  # Down-Right
 
 
 class BadCoords(Exception):
+    """Exception raised for invalid coordinates."""
     pass
 
 
 class AlreadyOccupied(Exception):
+    """Exception raised when attempting to place a token on an occupied cell."""
     pass
 
 
 class OutOfBounds(Exception):
+    """Exception raised when coordinates are out of board boundaries."""
     pass
 
 
 class Token:
-    def __init__(self, img, dim=1, label=None, **data):
-        self.img = img
-        self.dim = dim
-        self.label = label
-        self.data = data
+    """Represents a game token with an image, dimensions, and data.
 
-        self._board = None
-        self._x = 0
-        self._y = 0
+    Attributes:
+        image (Image): The image representing the token.
+        dimension (int): The dimension of the token (1x1, 2x2, etc. in grid cells).
+        label (Optional[str]): An optional label for the token (displayed on the board).
+        properties (Dict[str, Any]): A dictionary to store arbitrary token data.
+        hidden (bool): Whether the token is hidden on the board (default: False).
+    """
 
-        self.hidden = False
+    def __init__(self, image: Image, dimension: int = 1, label: Optional[str] = None, **data: Any):
+        """Initializes a Token object.
 
-    def __repr__(self):
-        if not self._board:
+        Args:
+            image: The Wand Image object for the token.
+            dimension: The size of the token in grid units (default: 1).
+            label: An optional text label for the token (default: None).
+            **data:  Arbitrary keyword arguments to be stored as token properties.
+        """
+        self.image: Image = image
+        self.dimension: int = dimension
+        self.label: Optional[str] = label
+        self.properties: Dict[str, Any] = data
+
+        self._game_board: Optional['Board'] = None
+        self._grid_x: int = 0
+        self._grid_y: int = 0
+
+        self.hidden: bool = False
+
+    def __repr__(self) -> str:
+        """Returns a string representation of the Token."""
+        if not self._game_board:
             return "<Token>"
+        return f"<Token {self._game_board} {self.pos}>"
 
-        return f"<Token {self._board} {self.pos}>"
-
-    def __str__(self):
+    def __str__(self) -> str:
+        """Returns a user-friendly string representation of the Token."""
         return repr(self)
 
-    def __setattr__(self, key, value):
-        if key in ("img", "dim", "label", "data", "_board", "_x", "_y", "hidden"):
+    def __setattr__(self, key: str, value: Any) -> None:
+        """Sets an attribute, recording changes to properties in history."""
+        if key in ("image", "dimension", "label", "properties", "_game_board", "_grid_x", "_grid_y", "hidden"):
             self.__dict__[key] = value
-
             return
 
-        if key in self.data:
-            self.record(HistoryRecord.UPDATE, key=key, new=value, old=self.data[key])
+        if key in self.properties:
+            self.record(HistoryRecord.UPDATE, key=key, new=value, old=self.properties[key])
         else:
             self.record(HistoryRecord.UPDATE, key=key, new=value)
 
-        self.data[key] = value
+        self.properties[key] = value
 
-    def __getattr__(self, key):
-        return self.data[key]
+    def __getattr__(self, key: str) -> Any:
+        """Gets an attribute, primarily accessing properties."""
+        return self.properties[key]
 
-    def _set_image(self, img):
-        if isinstance(img, bytes):
-            self.img = Image(blob=img)
-        elif isinstance(img, str):
-            self.img = Image(filename=img)
+    def _set_image(self, image_data: Image) -> None:
+        """Internal method to set and resize the token's image.
+
+        Args:
+            image_data: The image data (Image object, bytes, or filename).
+        """
+        if isinstance(image_data, bytes):
+            self.image = Image(blob=image_data)
+        elif isinstance(image_data, str):
+            self.image = Image(filename=image_data)
         else:
-            self.img = img
+            self.image = image_data
 
-        if (
-            self.img.size[0] != self._board.token_dim * self.dim
-            or self.img.size[1] != self._board.token_dim * self.dim
-        ):
-            if isinstance(img, Image):
-                self.img = self.img.clone()
+        expected_size = self._game_board.cell_size * self.dimension  # type: ignore # _game_board can't be None here
 
-            self.img.liquid_rescale(
-                self._board.token_dim * self.dim, self._board.token_dim * self.dim
-            )
+        if self.image.size[0] != expected_size or self.image.size[1] != expected_size:
+            if isinstance(image_data, Image):
+                self.image = self.image.clone()  # Clone to avoid modifying original image
 
-    def _set_board(self, board):
-        self._board = board
+            self.image.liquid_rescale(expected_size, expected_size)
 
-        self._set_image(self.img)
+    def _set_board(self, board: 'Board') -> None:
+        """Internal method to associate the token with a game board.
 
-    @property
-    def coords(self):
-        return self._x, self._y
+        Args:
+            board: The Board object to associate with.
+        """
+        self._game_board = board
+        self._set_image(self.image)
 
     @property
-    def pos(self):
-        l = next(itertools.islice(label_generator(), self._x, None)).upper()
-        i = self._board.h - self._y
+    def coords(self) -> Tuple[int, int]:
+        """Returns the token's grid coordinates (x, y)."""
+        return self._grid_x, self._grid_y
 
-        return l + str(i)
+    @property
+    def pos(self) -> str:
+        """Returns the token's position in algebraic notation (e.g., 'A1')."""
+        label_x = next(itertools.islice(label_generator(), self._grid_x, None)).upper()
+        label_y = self._game_board.grid_height - self._grid_y  # type: ignore # _game_board can't be None here
+        return label_x + str(label_y)
 
-    def record(self, action, **fields):
-        self._board.record(self, action, **fields)
+    def record(self, action: int, **fields: Any) -> None:
+        """Records an action in the game board's history.
 
-    def hide(self):
+        Args:
+            action: The action type (from HistoryRecord constants).
+            **fields: Additional data to record with the action.
+        """
+        if self._game_board:
+            self._game_board.record(self, action, **fields)
+
+    def hide(self) -> None:
+        """Hides the token on the board."""
         if not self.hidden:
             self.hidden = True
-
             self.record(HistoryRecord.HIDE)
 
-    def unhide(self):
+    def unhide(self) -> None:
+        """Unhides the token, making it visible on the board."""
         if self.hidden:
             self.hidden = False
-
             self.record(HistoryRecord.UNHIDE)
 
-    def remove(self):
+    def remove(self) -> None:
+        """Removes the token from the board."""
         self.record(HistoryRecord.REMOVE)
+        if self._game_board:
+            self._game_board.tokens.remove(self)
+        self._game_board = None
 
-        self._board.tokens.remove(self)
+    def move(self, pos: str, record: bool = True) -> None:
+        """Moves the token to a new position on the board.
 
-        self._board = None
+        Args:
+            pos: The target position in algebraic notation (e.g., 'B2') or coordinates (tuple).
+            record: Whether to record the move in history (default: True).
 
-    def move(self, pos, record=True):
+        Raises:
+            OutOfBounds: If the target position is outside the board boundaries.
+        """
         if isinstance(pos, tuple):
-            x, y = pos
+            target_x, target_y = pos
         else:
-            x, y = self._board.pos2coords(pos)
+            target_x, target_y = self._game_board.pos2coords(
+                pos)  # type: ignore # _game_board can't be None when token is on board
 
-        if self.dim > 1:
-            if x + self.dim > self._board.w:
+        if self.dimension > 1:
+            if target_x + self.dimension > self._game_board.grid_width:  # type: ignore
                 raise OutOfBounds
-
-            if y + self.dim > self._board.h:
+            if target_y + self.dimension > self._game_board.grid_height:  # type: ignore
                 raise OutOfBounds
 
         if record:
-            self.record(HistoryRecord.MOVE, ox=self._x, oy=self._y, x=x, y=y)
+            self.record(HistoryRecord.MOVE, ox=self._grid_x, oy=self._grid_y, x=target_x, y=target_y)
 
-        self._x = x
-        self._y = y
+        self._grid_x = target_x
+        self._grid_y = target_y
 
-    def step(self, dir, steps=1):
-        x = self._x
-        y = self._y
+    def step(self, direction: Tuple[int, int], steps: int = 1) -> None:
+        """Moves the token in a given direction for a specified number of steps.
+
+        Keeps token within board boundaries.
+
+        Args:
+            direction: A tuple representing the direction (from Direction class).
+            steps: The number of steps to take (default: 1).
+        """
+        current_x = self._grid_x
+        current_y = self._grid_y
 
         for _ in range(steps):
-            x += dir[0]
+            current_x += direction[0]
 
-            if x < 0:
-                x = 0
+            if current_x < 0:
+                current_x = 0
+            if current_x >= self._game_board.grid_width:  # type: ignore
+                current_x = self._game_board.grid_width - 1  # type: ignore
 
-            if x >= self._board.w:
-                x = self._board.w - 1
+            if self.dimension > 1:
+                if current_x + self.dimension > self._game_board.grid_width:  # type: ignore
+                    current_x = self._game_board.grid_width - self.dimension  # type: ignore
 
-            if self.dim > 1:
-                if x + self.dim > self._board.w:
-                    x = self._board.w - self.dim
+            current_y += direction[1]
 
-            y += dir[1]
+            if current_y < 0:
+                current_y = 0
+            if current_y >= self._game_board.grid_height:  # type: ignore
+                current_y = self._game_board.grid_height - 1  # type: ignore
 
-            if y < 0:
-                y = 0
+            if self.dimension > 1:
+                if current_y + self.dimension > self._game_board.grid_height:  # type: ignore
+                    current_y = self._game_board.grid_height - self.dimension  # type: ignore
 
-            if y >= self._board.h:
-                y = self._board.h - 1
-
-            if self.dim > 1:
-                if y + self.dim > self._board.h:
-                    y = self._board.h - self.dim
-
-        self.move((x, y))
+        self.move((current_x, current_y))
 
 
 class HistoryRecord:
-    CREATE = 0
-    MOVE = 1
-    HIDE = 2
-    UNHIDE = 3
-    REMOVE = 4
-    UPDATE = 5
+    """Represents a record of an action performed on the game board.
 
-    def __init__(self, action, token, **fields):
-        self.action = action
-        self.token = token
-        self.board = token._board
+    Constants:
+        CREATE (int): Action type for token creation.
+        MOVE (int): Action type for token movement.
+        HIDE (int): Action type for hiding a token.
+        UNHIDE (int): Action type for unhiding a token.
+        REMOVE (int): Action type for removing a token.
+        UPDATE (int): Action type for updating token properties.
+    """
+    CREATE: Literal[0] = 0
+    MOVE: Literal[1] = 1
+    HIDE: Literal[2] = 2
+    UNHIDE: Literal[3] = 3
+    REMOVE: Literal[4] = 4
+    UPDATE: Literal[5] = 5
 
-        self.fields = fields
+    def __init__(self, action: int, token: Token, **fields: Any):
+        """Initializes a HistoryRecord object.
 
-    def __repr__(self):
-        return f"<HistoryRecord {self.action} {self.token} {self.board}>"
+        Args:
+            action: The type of action performed (use HistoryRecord constants).
+            token: The Token object affected by the action.
+            **fields: Additional data associated with the action (e.g., old/new positions).
+        """
+        self.action: int = action
+        self.token: Token = token
+        self.game_board: 'Board' = token._game_board  # type: ignore # token always has board when history is recorded
+        self.record_data: Dict[str, Any] = fields
 
-    def __str__(self):
+    def __repr__(self) -> str:
+        """Returns a string representation of the HistoryRecord."""
+        return f"<HistoryRecord {self.action} {self.token} {self.game_board}>"
+
+    def __str__(self) -> str:
+        """Returns a user-friendly string representation of the HistoryRecord."""
         return repr(self)
 
-    def do(self):
-        match self.action:
-            case HistoryRecord.CREATE:
-                self.token._set_board(self.board)
+    def do(self) -> None:
+        """Applies the action recorded in the HistoryRecord (forward action)."""
+        if self.game_board is None:
+            return  # Prevent error if board is unexpectedly None
 
-                self.board.tokens.add(self.token)
+        if self.action == HistoryRecord.CREATE:
+            self.token._set_board(self.game_board)
+            self.game_board.tokens.add(self.token)
+            self.token._grid_x = self.record_data["x"]
+            self.token._grid_y = self.record_data["y"]
 
-                self.token._x = self.fields["x"]
-                self.token._y = self.fields["y"]
+        elif self.action == HistoryRecord.MOVE:
+            self.token._grid_x = self.record_data["x"]
+            self.token._grid_y = self.record_data["y"]
 
-            case HistoryRecord.MOVE:
-                self.token._x = self.fields["x"]
-                self.token._y = self.fields["y"]
+        elif self.action == HistoryRecord.HIDE:
+            self.token.hide()
 
-            case HistoryRecord.HIDE:
-                self.token.hide()
+        elif self.action == HistoryRecord.UNHIDE:
+            self.token.unhide()
 
-            case HistoryRecord.UNHIDE:
-                self.token.unhide()
+        elif self.action == HistoryRecord.REMOVE:
+            if self.token in self.game_board.tokens:  # Check if token is still in board's tokens
+                self.game_board.tokens.remove(self.token)
+            self.token._game_board = None
 
-            case HistoryRecord.REMOVE:
-                self.board.tokens.remove(self.token)
+        elif self.action == HistoryRecord.UPDATE:
+            self.token.properties[self.record_data["key"]] = self.record_data["new"]
 
-                self.token._board = None
+    def undo(self) -> None:
+        """Reverts the action recorded in the HistoryRecord (undo action)."""
+        if self.game_board is None:
+            return  # Prevent error if board is unexpectedly None
 
-            case HistoryRecord.UPDATE:
-                self.token.data[self.fields["key"]] = self.fields["new"]
+        if self.action == HistoryRecord.CREATE:
+            if self.token in self.game_board.tokens:  # Check if token is still in board's tokens
+                self.game_board.tokens.remove(self.token)
+            self.token._game_board = None
 
-    def undo(self):
-        match self.action:
-            case HistoryRecord.CREATE:
-                self.board.tokens.remove(self.token)
+        elif self.action == HistoryRecord.MOVE:
+            self.token._grid_x = self.record_data["ox"]
+            self.token._grid_y = self.record_data["oy"]
 
-                self.token._board = None
+        elif self.action == HistoryRecord.HIDE:
+            self.token.unhide()
 
-            case HistoryRecord.MOVE:
-                self.token._x = self.fields["ox"]
-                self.token._y = self.fields["oy"]
+        elif self.action == HistoryRecord.UNHIDE:
+            self.token.hide()
 
-            case HistoryRecord.HIDE:
-                self.token.unhide()
+        elif self.action == HistoryRecord.REMOVE:
+            self.token._set_board(self.game_board)
+            self.game_board.tokens.add(self.token)
 
-            case HistoryRecord.UNHIDE:
-                self.token.hide()
-
-            case HistoryRecord.REMOVE:
-                self.token._set_board(self.board)
-
-                self.board.tokens.add(self.token)
-
-            case HistoryRecord.UPDATE:
-                if "old" not in self.fields:
-                    del self.token.data[self.fields["key"]]
-                else:
-                    self.token.data[self.fields["key"]] = self.fields["old"]
+        elif self.action == HistoryRecord.UPDATE:
+            if "old" not in self.record_data:
+                del self.token.properties[self.record_data["key"]]
+            else:
+                self.token.properties[self.record_data["key"]] = self.record_data["old"]
 
 
 class Board:
+    """Represents a game board with tokens and history management.
+
+    Attributes:
+        background_image (Image): The background image for the board.
+        grid_width (int): Width of the board in grid cells.
+        grid_height (int): Height of the board in grid cells.
+        cell_size (int): Size of each grid cell in pixels (default: 70).
+        padding (int): Padding around the grid in pixels (default: 48).
+        font (str): Font file path for text elements (default: "./Arial.ttf").
+        grid_font_size (int): Font size for grid labels (default: 28).
+        token_label_font_size (int): Font size for token labels (default: 20).
+        token_label_outline_width (int): Outline width for token labels (default: 3).
+        grid_line_width (int): Line width for grid lines (default: 2).
+        tokens (Set[Token]): Set of tokens currently on the board.
+        _history (List[HistoryRecord]): List of history records for undo/redo.
+        _history_index (int): Current position in the history list.
+    """
+
     def __init__(
-        self,
-        bgimg,
-        dim=None,
-        token_dim=70,
-        padding=48,
-        font="./Arial.ttf",
-        font_size=28,
-        label_font_size=20,
-        label_outline_width=3,
-        line_width=2,
+            self,
+            background_image: Image,
+            dimensions: Optional[Tuple[int, int]] = None,
+            cell_size: int = 70,
+            padding: int = 48,
+            font: str = "./Arial.ttf",
+            grid_font_size: int = 28,
+            token_label_font_size: int = 20,
+            token_label_outline_width: int = 3,
+            grid_line_width: int = 2,
     ):
-        if isinstance(bgimg, bytes):
-            bgimg = Image(blob=bgimg)
-        elif isinstance(bgimg, str):
-            bgimg = Image(filename=bgimg)
+        """Initializes a Board object.
 
-        if dim is not None:
-            w, h = dim
+        Args:
+            background_image: Wand Image object or filename/bytes for the background.
+            dimensions: Tuple (width, height) of the board in grid cells. If None, dimensions are derived from background image size and cell_size.
+            cell_size: Size of each grid cell in pixels (default: 70).
+            padding: Padding around the grid in pixels (default: 48).
+            font: Font file path for text elements (default: "./Arial.ttf").
+            grid_font_size: Font size for grid labels (default: 28).
+            token_label_font_size: Font size for token labels (default: 20).
+            token_label_outline_width: Outline width for token labels (default: 3).
+            grid_line_width: Line width for grid lines (default: 2).
+
+        Raises:
+            ValueError: If board dimensions are less than 2x2.
+        """
+        if isinstance(background_image, bytes):
+            background_image = Image(blob=background_image)
+        elif isinstance(background_image, str):
+            background_image = Image(filename=background_image)
+
+        if dimensions is not None:
+            grid_width, grid_height = dimensions
         else:
-            w, h = bgimg.size
+            grid_width = background_image.size[0] // cell_size
+            grid_height = background_image.size[1] // cell_size
 
-            w //= token_dim
-            h //= token_dim
+        if grid_width < 2 or grid_height < 2:
+            raise ValueError("Board dimensions must be at least 2x2")
 
-        if w < 2 or h < 2:
-            raise ValueError
+        self.grid_width: int = grid_width
+        self.grid_height: int = grid_height
 
-        self.w = w
-        self.h = h
+        self.cell_size: int = cell_size
+        self.padding: int = padding
+        self.font: str = font
+        self.grid_font_size: int = grid_font_size
+        self.grid_line_width: int = grid_line_width
+        self.token_label_font_size: int = token_label_font_size
+        self.token_label_outline_width: int = token_label_outline_width
 
-        self.token_dim = token_dim
-        self.padding = padding
-        self.font = font
-        self.font_size = font_size
-        self.line_width = line_width
-        self.label_font_size = label_font_size
-        self.label_outline_width = label_outline_width
+        self.pixel_width: int = grid_width * self.cell_size + self.padding * 2
+        self.pixel_height: int = grid_height * self.cell_size + self.padding * 2
 
-        self.pw = w * self.token_dim + self.padding * 2
-        self.ph = h * self.token_dim + self.padding * 2
+        background_image.liquid_rescale(self.pixel_width - self.padding * 2, self.pixel_height - self.padding * 2)
 
-        bgimg.liquid_rescale(self.pw - self.padding * 2, self.ph - self.padding * 2)
+        with Image(width=1, height=1) as temp_image:  # Use temp image to get font metrics
+            with Drawing() as temp_draw:
+                temp_draw.font = self.font
+                temp_draw.font_size = self.grid_font_size
+                self.font_metrics = temp_draw.get_font_metrics(temp_image, "lorem ipsum")  # type: ignore
 
-        with Image(width=1, height=1) as im:
-            with Drawing() as draw:
-                self.font_size = self.font_size
-                self.font_metrics = draw.get_font_metrics(im, "lorem ipsum")
+                temp_draw.font_size = self.token_label_font_size
+                self.label_font_metrics = temp_draw.get_font_metrics(temp_image, "lorem ipsum")  # type: ignore
 
-                self.font_size = self.label_font_size
-                self.label_font_metrics = draw.get_font_metrics(im, "lorem ipsum")
+        self.background_image: Image = background_image
 
-        self.bgimg = bgimg
+        self.tokens: Set[Token] = set()
 
-        self.tokens = set()
+        self._history: List[HistoryRecord] = []
+        self._history_index: int = -1
 
-        self.history = []
-        self.history_pos = -1
+    def __repr__(self) -> str:
+        """Returns a string representation of the Board."""
+        return f"<Board {self.grid_width}x{self.grid_height}>"
 
-    def __repr__(self):
-        return f"<Board {self.w}x{self.h}>"
-
-    def __str__(self):
+    def __str__(self) -> str:
+        """Returns a user-friendly string representation of the Board."""
         return repr(self)
 
-    def record(self, token, action, **fields):
-        if self.history_pos < -1:
-            self.history = self.history[: self.history_pos]
-            self.history_pos = -1
+    def record(self, token: Token, action: int, **fields: Any) -> None:
+        """Records an action to the history.
 
-        self.history.append(HistoryRecord(action, token, **fields))
+        Args:
+            token: The Token object involved in the action.
+            action: The action type (from HistoryRecord constants).
+            **fields: Additional data to store with the history record.
+        """
+        if self._history_index < -1:
+            self._history = self._history[: self._history_index + 1]  # Discard redo history
+            self._history_index = -1
 
-    def undo(self):
-        if abs(self.history_pos) > len(self.history) or not self.history:
-            raise OutOfBounds
+        self._history.append(HistoryRecord(action, token, **fields))
 
-        self.history[self.history_pos].undo()
-        self.history_pos -= 1
+    def undo(self) -> None:
+        """Undoes the last recorded action."""
+        if abs(self._history_index) > len(self._history) or not self._history:
+            raise OutOfBounds("No more actions to undo.")
 
-    def redo(self):
-        if self.history_pos >= -1:
-            raise OutOfBounds
+        self._history[self._history_index].undo()
+        self._history_index -= 1
 
-        self.history_pos += 1
-        self.history[self.history_pos].do()
+    def redo(self) -> None:
+        """Redoes the last undone action."""
+        if self._history_index >= -1:
+            raise OutOfBounds("No more actions to redo.")
 
-    def pos2coords(self, pos):
-        x, y = POS_RE.match(pos.strip().upper()).groups()
-        x = label2index(x)
-        y = self.h - int(y)
+        self._history_index += 1
+        self._history[self._history_index].do()
 
-        if x < 0 or x >= self.w or y < 0 or y >= self.h:
-            raise BadCoords(x, y)
+    def pos2coords(self, pos: str) -> Tuple[int, int]:
+        """Converts an algebraic position (e.g., 'A1') to grid coordinates (x, y).
 
-        return x, y
+        Args:
+            pos: The position string in algebraic notation.
 
-    def get(self, pos):
+        Returns:
+            Tuple[int, int]: The grid coordinates (x, y).
+
+        Raises:
+            BadCoords: If the position is invalid or out of bounds.
+        """
+        match = POS_RE.match(pos.strip().upper())
+        if not match:
+            raise BadCoords(f"Invalid position format: {pos}")
+
+        label_x_str, label_y_str = match.groups()
+        grid_x = label2index(label_x_str)
+        grid_y = self.grid_height - int(label_y_str)
+
+        if not (0 <= grid_x < self.grid_width and 0 <= grid_y < self.grid_height):
+            raise BadCoords(f"Position {pos} is out of bounds.")
+
+        return grid_x, grid_y
+
+    def get(self, pos: str) -> Optional[Token]:
+        """Retrieves the token at a given position.
+
+        Args:
+            pos: The position in algebraic notation or grid coordinates.
+
+        Returns:
+            Optional[Token]: The Token at the position, or None if no token is present.
+        """
         if isinstance(pos, tuple):
-            x, y = pos
+            grid_x, grid_y = pos
         else:
-            x, y = self.pos2coords(pos)
+            grid_x, grid_y = self.pos2coords(pos)
 
         for token in self.tokens:
-            ox, oy = token.coords
-            dim = token.dim
-            if dim == 1:
-                dim = 0
+            token_ox, token_oy = token.coords
+            dimension = token.dimension
+            if dimension == 1:
+                dimension = 0  # Adjust dimension for range check
 
-            sx = ox
-            ex = ox + dim
-            sy = oy
-            ey = oy + dim
+            start_x = token_ox
+            end_x = token_ox + dimension + 1
+            start_y = token_oy
+            end_y = token_oy + dimension + 1
 
-            if x >= sx and x < ex and y >= sy and y < ey:
+            if start_x <= grid_x < end_x and start_y <= grid_y < end_y:
                 return token
-
         return None
 
-    def add(self, pos, token):
-        if token._board is not None or token in self.tokens:
-            raise ValueError
+    def add(self, pos: str, token: Token) -> None:
+        """Adds a token to the board at the specified position.
+
+        Args:
+            pos: The target position in algebraic notation (e.g., 'C3').
+            token: The Token object to add.
+
+        Raises:
+            ValueError: If the token is already on a board or in the tokens set.
+        """
+        if token._game_board is not None or token in self.tokens:
+            raise ValueError("Token is already on a board or added to this board.")
 
         token._set_board(self)
-
-        token.move(pos, record=False)
-
+        token.move(pos, record=False)  # Initial move, record=False to be recorded in CREATE action
         self.tokens.add(token)
+        token.record(HistoryRecord.CREATE, x=token._grid_x, y=token._grid_y)
 
-        token.record(HistoryRecord.CREATE, x=token._x, y=token._y)
+    def draw(self, unhide: bool = False) -> Image:
+        """Draws the current state of the board as an Image.
 
-    def draw(self, unhide=False):
-        im = Image(width=self.pw, height=self.ph, pseudo="canvas:")
+        Args:
+            unhide: If True, draws hidden tokens as well (default: False).
 
-        im.composite(self.bgimg, self.padding, self.padding)
+        Returns:
+            Image: The rendered board image.
+        """
+        board_image = Image(width=self.pixel_width, height=self.pixel_height, pseudo="canvas:")
+        board_image.composite(self.background_image, self.padding, self.padding)
 
-        with Drawing() as draw:
-            draw.stroke_color = Color("black")
-            draw.stroke_width = 3
-            draw.font = self.font
-            draw.font_size = self.font_size
+        draw_context = Drawing()  # Create Drawing context once
+        draw_context.stroke_color = Color("black")
+        draw_context.stroke_width = 3
+        draw_context.font = self.font
+        draw_context.font_size = self.grid_font_size
 
-            for x in range(self.padding, self.pw, self.token_dim):
-                draw.line((x, 0), (x, self.ph))
+        # Draw grid lines
+        for x in range(self.padding, self.pixel_width, self.cell_size):
+            draw_context.line((x, 0), (x, self.pixel_height))
+        for y in range(self.padding, self.pixel_height, self.cell_size):
+            draw_context.line((0, y), (self.pixel_width, y))
 
-            for y in range(self.padding, self.ph, self.token_dim):
-                draw.line((0, y), (self.pw, y))
+        # Draw column labels (A, B, C...)
+        for i, label in zip(range(self.grid_width), label_generator()):
+            x_pos = self.padding + 5 + i * self.cell_size
+            draw_context.text(x_pos, self.grid_font_size, label)
+            draw_context.text(x_pos, self.pixel_height, label)
 
-            for i, l in zip(range(self.w), label_generator()):
-                x = self.padding + i * self.token_dim
+        # Draw row labels (1, 2, 3...)
+        for i, j in zip(reversed(range(self.grid_height)), range(self.grid_height)):
+            y_pos = self.padding + self.grid_font_size + i * self.cell_size
+            draw_context.text(0, y_pos, str(j + 1))
+            draw_context.text(self.pixel_width - self.grid_font_size, y_pos, str(j + 1))
 
-                draw.text(x, self.font_size, l)
-                draw.text(x, self.ph, l)
+        draw_context(board_image)  # Apply grid and labels
 
-            for i, j in zip(reversed(range(self.h)), range(self.h)):
-                y = self.padding + self.font_size + i * self.token_dim
+        # Draw tokens
+        draw_context.font = self.font  # Reset font for token labels (if different)
+        for token in self.tokens:
+            if not unhide and token.hidden:
+                continue
 
-                draw.text(0, y, str(j + 1))
-                draw.text(self.pw - self.font_size, y, str(j + 1))
+            token_x, token_y = token.coords
+            board_image.composite(
+                token.image,
+                token_x * self.cell_size + self.padding,
+                token_y * self.cell_size + self.padding,
+            )
 
-            draw(im)
+            if token.label is not None:
+                max_label_length = math.ceil(
+                    self.cell_size / self.label_font_metrics.character_width  # type: ignore
+                )
+                truncated_label = token.label[:max_label_length]
 
-        with Drawing() as draw:
-            draw.font = self.font
-
-            for token in self.tokens:
-                if not unhide and token.hidden:
-                    continue
-
-                x, y = token.coords
-
-                im.composite(
-                    token.img,
-                    x * self.token_dim + self.padding,
-                    y * self.token_dim + self.padding,
+                draw_context.stroke_color = Color("black")
+                draw_context.font_size = self.token_label_font_size + self.token_label_outline_width
+                draw_context.text(
+                    token_x * self.cell_size + self.padding,
+                    token_y * self.cell_size + self.padding + self.cell_size,
+                    truncated_label,
                 )
 
-                if token.label is not None:
-                    maxlen = math.ceil(
-                        self.token_dim / self.label_font_metrics.character_width
-                    )
+                draw_context.stroke_color = Color("white")
+                draw_context.font_size = self.token_label_font_size
+                draw_context.text(
+                    token_x * self.cell_size + self.padding,
+                    token_y * self.cell_size + self.padding + self.cell_size,
+                    truncated_label,
+                )
+        draw_context(board_image)  # Apply tokens and labels
 
-                    draw.stroke_color = Color("black")
-                    draw.font_size = self.label_font_size + self.label_outline_width
-                    draw.text(
-                        x * self.token_dim + self.padding,
-                        y * self.token_dim + self.padding + self.token_dim,
-                        token.label[:maxlen],
-                    )
+        return board_image
 
-                    draw.stroke_color = Color("white")
-                    draw.font_size = self.label_font_size
-                    draw.text(
-                        x * self.token_dim + self.padding,
-                        y * self.token_dim + self.padding + self.token_dim,
-                        token.label[:maxlen],
-                    )
+    def replay(self, delay: Optional[int] = None, optimize: bool = True) -> Image:
+        """Generates an animated GIF replay of the history.
 
-            draw(im)
+        Args:
+            delay: Delay in milliseconds between frames (default: None, no delay).
+            optimize: Whether to optimize the GIF layers (default: True).
 
-        return im
-
-    def replay(self, delay=None, optimize=True):
-        while self.history_pos >= -len(self.history):
+        Returns:
+            Image: The animated GIF image.
+        """
+        while self._history_index >= -len(self._history):
             self.undo()
 
-        im = self.draw()
+        replay_image = self.draw()
 
         if delay:
-            im.delay = int(im.ticks_per_second / 1000 * delay)
+            replay_image.delay = int(replay_image.ticks_per_second / 1000 * delay)
 
-        while self.history_pos < -1:
+        while self._history_index < -1:
             self.redo()
-
-            im.sequence.append(self.draw())
+            replay_image.sequence.append(self.draw())
 
         if delay:
-            for frame in im.sequence:
+            for frame in replay_image.sequence:
                 frame.delay = int(frame.ticks_per_second / 1000 * delay)
 
         if optimize:
-            im.optimize_layers()
+            replay_image.optimize_layers()
 
-        return im
+        return replay_image
